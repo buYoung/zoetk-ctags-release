@@ -9,3 +9,9 @@
 
 # Stray build logs
 *.log
+
+# macOS code-signing material — NEVER commit (contains the Developer ID private key).
+# Used by the sign-macos job; managed locally under keychains/.
+/keychains/
+*.keychain-db
+*.p12

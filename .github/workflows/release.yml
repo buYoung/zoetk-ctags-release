@@ -41,10 +41,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout this repo (contains vendored zoekt)
-        uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+        uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
+          # The Go module lives in the vendored subdir, not at repo root; point the
+          # built-in module cache at its go.sum, else setup-go warns
+          # "Dependencies file is not found ... Supported file pattern: go.sum".
+          cache-dependency-path: third_party/zoekt/go.sum
       - name: Build zoekt binaries from vendored source
         env:
           CGO_ENABLED: "0"
@@ -58,7 +62,7 @@ jobs:
             go build -trimpath -ldflags="-s -w" \
               -o "${GITHUB_WORKSPACE}/dist/${cmd}${{ matrix.ext }}" "./cmd/${cmd}"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: zoekt-${{ matrix.target }}
           path: dist/
@@ -114,45 +118,102 @@ jobs:
               /work/out/bin/universal-ctags --list-features | grep -wq json
               /work/out/bin/universal-ctags --list-features | grep -wq interactive
             '
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ctags-${{ matrix.target }}
           path: out/bin/universal-ctags
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # universal-ctags on macOS: minimal + self-contained.
-  #  - jansson built from source as a static lib (reliable deployment-target
-  #    floor, unlike the Homebrew bottle which targets the runner's macOS).
-  #  - PKG_CONFIG_LIBDIR scoped to an empty dir so libyaml/pcre2/libxml2 are
-  #    NOT picked up -> feature set is +json +interactive only (parity), and the
-  #    only remaining deps are system /usr/lib (self-contained).
-  # NOTE: binaries are unsigned -> Gatekeeper will warn on end-user machines.
+  # universal-ctags on macOS: minimal + self-contained, built on a SELF-HOSTED
+  # Apple Silicon (arm64) Mac. One physical machine produces BOTH targets:
+  #   - macos-arm64: native build (-arch arm64).
+  #   - macos-amd64: cross-compiled (-arch x86_64) from the same arm64 host; the
+  #     universal macOS SDK lets one clang emit x86_64. Verified at runtime via
+  #     Rosetta 2 (installed once on this machine; idempotent thereafter).
+  # We DON'T use GitHub-hosted macOS runners: macos-13 (Intel) was retired Dec 2025
+  # (jobs hung at "Waiting for a runner..."), and bare macos-14/15 are arm64-only.
+  # Design (unchanged from before): jansson built from source as a static lib
+  # (controlled deployment floor); PKG_CONFIG_LIBDIR scoped to an empty dir so
+  # libyaml/pcre2/libxml2 are NOT picked up -> +json +interactive only (parity),
+  # leaving only system /usr/lib deps (self-contained). Binaries are signed +
+  # notarized later in the `sign-macos` job (not here).
+  #
+  # Runner: register a self-hosted runner on your arm64 Mac advertising the labels
+  # below. `ctags-mac` is a CUSTOM label -- change it to whatever your runner
+  # actually advertises (e.g. reuse corral's `tauri-mac`). This workflow triggers
+  # only on tag push / workflow_dispatch (never pull_request), so a self-hosted
+  # runner is not exposed to fork-PR code execution.
   # ---------------------------------------------------------------------------
   build-ctags-macos:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { target: macos-amd64, runner: macos-13, min: "10.15" }   # Intel
-          - { target: macos-arm64, runner: macos-14, min: "11.0" }    # Apple Silicon (arm64 min is 11.0)
-    runs-on: ${{ matrix.runner }}
+          - { target: macos-amd64, arch: x86_64, min: "10.15" }   # Intel: cross-built on arm64
+          - { target: macos-arm64, arch: arm64,  min: "11.0"  }   # Apple Silicon: native (arm64 min is 11.0)
+    runs-on: [self-hosted, macOS, arm64, ctags-mac]
     steps:
+      - name: Prepare clean workspace
+        run: |
+          set -eux
+          # Self-hosted runners persist the workspace between runs; remove any
+          # leftover build trees so curl|tar and ./configure start from scratch.
+          rm -rf "${GITHUB_WORKSPACE}/jansson-2.15.0" \
+                 "${GITHUB_WORKSPACE}/jansson-prefix" \
+                 "${GITHUB_WORKSPACE}/${CTAGS_TARBALL_DIR}" \
+                 "${GITHUB_WORKSPACE}/out"
       - name: Install build deps
-        run: brew install autoconf automake pkg-config
+        run: |
+          set -eux
+          # Guard on the COMMAND (pkgconf provides the pkg-config symlink), not the
+          # brew keg name, so the pkg-config->pkgconf rename can't defeat the check
+          # and we don't reinstall what the self-hosted machine already has.
+          # autogen.sh just needs these tools present, whatever provides them.
+          for c in autoconf automake pkg-config; do
+            command -v "$c" >/dev/null 2>&1 || brew install "$c"
+          done
+      - name: Ensure Rosetta 2 (x86_64 runtime verification)
+        if: matrix.arch == 'x86_64'
+        run: |
+          set -eux
+          # Rosetta lets this arm64 host run the cross-built x86_64 ctags for the
+          # --list-features check. On a persistent self-hosted machine it's normally
+          # a ONE-TIME host setup; skip if the runtime marker is already present.
+          if [ -f /Library/Apple/usr/share/rosetta/rosetta ] \
+             || [ -f /Library/Apple/usr/libexec/oah/libRosettaRuntime ]; then
+            echo "Rosetta 2 already installed"
+            exit 0
+          fi
+          # Otherwise try to install it (may need elevation). If your runner user has
+          # no passwordless sudo, install it once manually on the Mac instead:
+          #   softwareupdate --install-rosetta --agree-to-license
+          sudo softwareupdate --install-rosetta --agree-to-license \
+            || softwareupdate --install-rosetta --agree-to-license
       - name: Build minimal self-contained universal-ctags
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.min }}
         run: |
           set -eux
+          # Arch is set by `clang -arch`, NOT the autoconf triple, so -arch must be in
+          # BOTH CFLAGS and LDFLAGS and identical for jansson and ctags (else the static
+          # libjansson.a and the final link mismatch). For x86_64 we add --host to put
+          # autotools in cross mode (skips run-tests it can't execute); the native arm64
+          # cell needs no --host. config.guess supplies the build (arm64) triple.
+          ARCHFLAGS="-arch ${{ matrix.arch }} -mmacosx-version-min=${{ matrix.min }}"
+          CROSS=""
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            CROSS="--host=x86_64-apple-darwin"
+          fi
           PFX="${GITHUB_WORKSPACE}/jansson-prefix"
-          # 1) static jansson from source (native arch, controlled deployment floor)
+          # 1) static jansson from source (controlled deployment floor)
           curl -fL --retry 5 \
             "https://github.com/akheron/jansson/releases/download/v2.15.0/jansson-2.15.0.tar.gz" \
             | tar xz
           ( cd jansson-2.15.0
             ./configure --prefix="$PFX" --enable-static --disable-shared \
-              CFLAGS="-mmacosx-version-min=${{ matrix.min }}"
+              $CROSS CC=clang \
+              CFLAGS="$ARCHFLAGS -O2" LDFLAGS="-arch ${{ matrix.arch }}"
             make -j"$(sysctl -n hw.ncpu)"
             make install )
           # 2) ctags: empty PKG_CONFIG_LIBDIR drops yaml/pcre2/xml2; jansson via explicit static override
@@ -165,21 +226,30 @@ jobs:
           PKG_CONFIG_LIBDIR="$EMPTY" ./configure \
             --prefix="${GITHUB_WORKSPACE}/out" \
             --program-prefix=universal- --enable-json --disable-readcmd \
-            CFLAGS="-mmacosx-version-min=${{ matrix.min }} -O2" \
+            $CROSS CC=clang \
+            CFLAGS="$ARCHFLAGS -O2" LDFLAGS="-arch ${{ matrix.arch }}" \
             JANSSON_CFLAGS="-I${PFX}/include" \
             JANSSON_LIBS="${PFX}/lib/libjansson.a"
           make -j"$(sysctl -n hw.ncpu)"
           make install
           strip "${GITHUB_WORKSPACE}/out/bin/universal-ctags"
-      - name: Verify (json + interactive + self-contained)
+      - name: Verify (arch + json + interactive + self-contained)
         run: |
           set -eux
           B="${GITHUB_WORKSPACE}/out/bin/universal-ctags"
-          "$B" --list-features | grep -wq json
-          "$B" --list-features | grep -wq interactive
+          # Build-time gate (both cells): correct arch + only system libs remain.
+          lipo -archs "$B" | grep -wq "${{ matrix.arch }}"
           # fail if any non-system (Homebrew) or jansson dylib dependency remains
           ! otool -L "$B" | awk 'NR>1{print $1}' | grep -qE '^/opt/homebrew|^/usr/local|libjansson'
-      - uses: actions/upload-artifact@v4
+          # Runtime feature check: arm64 natively, x86_64 through Rosetta.
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            "$B" --list-features | grep -wq json
+            "$B" --list-features | grep -wq interactive
+          else
+            arch -x86_64 "$B" --list-features | grep -wq json
+            arch -x86_64 "$B" --list-features | grep -wq interactive
+          fi
+      - uses: actions/upload-artifact@v6
         with:
           name: ctags-${{ matrix.target }}
           path: out/bin/universal-ctags
@@ -246,18 +316,142 @@ jobs:
           file "$B"
           # fail if any non-system (jansson/iconv) DLL import remains -> not static
           ! "$TRIPLE-objdump" -p "$B" | grep -iE 'jansson|iconv'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ctags-${{ matrix.target }}
           path: out/universal-ctags.exe
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Sign + notarize the WHOLE macOS payload (zoekt + ctags) on the self-hosted
+  # Mac. The zoekt binaries are cross-built on Linux and never touch a Mac, so
+  # this is the only place they can get a Developer ID signature; ctags is built
+  # on this same Mac. Per arch we pull the 4 macOS Mach-O binaries, codesign each
+  # with Developer ID Application + hardened runtime + secure timestamp, then
+  # notarize them in a single submission.
+  #
+  # NOTE: loose CLI executables cannot be `stapler staple`d (stapling only works
+  # on .dmg/.pkg/.app). Notarization still succeeds -- the ticket is published to
+  # Apple by cdhash and Gatekeeper validates online on first run -- so the bundle
+  # stays a .tar.gz and the ticket is NOT embedded in the file.
+  #
+  # Requires repo (or org) secrets: MACOS_KEYCHAIN_PASSWORD (unlocks the signing
+  # keychain), APPLE_ID, APPLE_PASSWORD (app-specific), APPLE_TEAM_ID. The keychain
+  # Host prerequisite: the keychain ~/Library/Keychains/livteam-signing.keychain-db
+  # (holding the Developer ID identity) must already exist on the runner Mac, and
+  # MACOS_KEYCHAIN_PASSWORD must equal its password. Unlock + search-list + key
+  # partition-list are all handled in-job (below), so no other host setup is needed.
+  # We sign by SHA-1 fingerprint, NOT the cert name, because multiple
+  # "Developer ID Application: buyong lee" certs exist on this Mac -> signing by
+  # name would be ambiguous.
+  # ---------------------------------------------------------------------------
+  sign-macos:
+    needs: [build-zoekt, build-ctags-macos]
+    runs-on: [self-hosted, macOS, arm64, ctags-mac]
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [macos-amd64, macos-arm64]
+    steps:
+      - name: Prepare clean workspace
+        run: |
+          set -eux
+          rm -rf "${GITHUB_WORKSPACE}/sign"
+          mkdir -p "${GITHUB_WORKSPACE}/sign"
+      # Pull this arch's zoekt (3 bins) + ctags (1 bin) into one flat dir to sign.
+      - uses: actions/download-artifact@v7
+        with:
+          name: zoekt-${{ matrix.target }}
+          path: sign
+      - uses: actions/download-artifact@v7
+        with:
+          name: ctags-${{ matrix.target }}
+          path: sign
+      - name: Unlock signing keychain
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          set -eux
+          KEYCHAIN_PATH="$HOME/Library/Keychains/livteam-signing.keychain-db"
+          if [ ! -f "$KEYCHAIN_PATH" ]; then
+            echo "Signing keychain not found at $KEYCHAIN_PATH" >&2
+            exit 1
+          fi
+          # codesign only searches the user keychain search list. A runner started as
+          # a launchd service may begin with a reduced list, so add our keychain if
+          # missing. Idempotent + non-destructive (no-op when already present), so no
+          # restore step is needed -- it's the user's own keychain. Build the new list
+          # in an array (quote-safe: paths with spaces won't word-split).
+          if ! security list-keychains -d user | grep -Fq "livteam-signing.keychain-db"; then
+            existing=()
+            while IFS= read -r line; do
+              kc="${line#*\"}"; kc="${kc%\"*}"   # strip the surrounding quotes
+              [ -n "$kc" ] && existing+=("$kc")
+            done < <(security list-keychains -d user)
+            security list-keychains -d user -s "$KEYCHAIN_PATH" "${existing[@]}"
+          fi
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          # Grant codesign non-interactive access to the private key. WITHOUT this a
+          # headless launchd runner fails with errSecInternalComponent / "User
+          # interaction is not allowed" (it never shows a GUI prompt). Idempotent.
+          security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+      - name: Codesign (Developer ID + hardened runtime)
+        env:
+          # Sign by SHA-1 fingerprint, NOT the friendly name: several
+          # "Developer ID Application: buyong lee (QTQPM83KWL)" certs exist on this
+          # Mac, so the name is ambiguous and `codesign --sign <name>` would fail.
+          # This hash = the identity in livteam-signing.keychain-db. Not secret;
+          # change it (security find-identity -v -p codesigning <keychain>) if the
+          # cert is rotated.
+          SIGNING_IDENTITY: "29288FE3B51E827A802682ED015D555EC037B19E"
+        run: |
+          set -eux
+          cd "${GITHUB_WORKSPACE}/sign"
+          for b in *; do
+            [ -f "$b" ] || continue
+            # --timestamp (secure timestamp) + --options runtime (hardened runtime)
+            # are both REQUIRED for notarization. strip already ran in the build job;
+            # signing must be the last mutation or it invalidates the signature.
+            codesign --force --timestamp --options runtime \
+              --sign "$SIGNING_IDENTITY" "$b"
+            codesign --verify --strict --verbose=2 "$b"
+          done
+      - name: Notarize (single submission for all binaries of this arch)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -eux
+          # notarytool needs a container; zip all signed binaries and submit once.
+          ZIP="${RUNNER_TEMP}/${{ matrix.target }}-notarize.zip"
+          rm -f "$ZIP"
+          ditto -c -k "${GITHUB_WORKSPACE}/sign" "$ZIP"
+          xcrun notarytool submit "$ZIP" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          # No `stapler staple`: loose executables aren't a staple-able container.
+      - uses: actions/upload-artifact@v6
+        with:
+          # Combined, signed+notarized macOS payload (zoekt + ctags) for this arch.
+          # package-and-release consumes THIS instead of the unsigned zoekt-/ctags-*.
+          name: signed-${{ matrix.target }}
+          path: sign/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Bundle zoekt + ctags per platform and publish. `if: always()` is defensive:
   # if any single cell fails, still release the cells that succeeded.
+  # macOS uses the signed+notarized payload (signed-macos-*); linux/windows use
+  # the plain zoekt-/ctags-* artifacts.
   # ---------------------------------------------------------------------------
   package-and-release:
-    needs: [build-zoekt, build-ctags-linux, build-ctags-macos, build-ctags-windows]
+    needs: [build-zoekt, build-ctags-linux, build-ctags-windows, sign-macos]
     if: always()
     runs-on: ubuntu-24.04
     permissions:
@@ -265,8 +459,8 @@ jobs:
     steps:
       # Repo checkout is needed so we can read CHANGELOG.md (authored by codex,
       # reviewed before the tag was pushed) and inject it into the release body.
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
       - name: Assemble per-platform archives
@@ -274,20 +468,36 @@ jobs:
           set -eux
           mkdir -p out
           for t in linux-amd64 linux-arm64 macos-amd64 macos-arm64 windows-amd64 windows-arm64; do
-            z="artifacts/zoekt-${t}"
-            c="artifacts/ctags-${t}"
-            if [ -d "$z" ] && [ -d "$c" ]; then
-              stage="stage/${t}"; mkdir -p "$stage"
-              cp "$z"/* "$stage"/
-              cp "$c"/* "$stage"/
-              chmod +x "$stage"/* || true
-              case "$t" in
-                windows-*) (cd stage && zip -r "../out/zoekt-ctags-${t}.zip" "$t") ;;
-                *)         tar -czf "out/zoekt-ctags-${t}.tar.gz" -C stage "$t" ;;
-              esac
-            else
-              echo "::warning::skip ${t} (zoekt=$([ -d "$z" ] && echo ok || echo MISSING), ctags=$([ -d "$c" ] && echo ok || echo MISSING))"
-            fi
+            case "$t" in
+              macos-*)
+                # signed-macos-* already bundles BOTH zoekt + ctags (signed+notarized).
+                s="artifacts/signed-${t}"
+                if [ -d "$s" ]; then
+                  stage="stage/${t}"; mkdir -p "$stage"
+                  cp "$s"/* "$stage"/
+                  chmod +x "$stage"/* || true
+                  tar -czf "out/zoekt-ctags-${t}.tar.gz" -C stage "$t"
+                else
+                  echo "::warning::skip ${t} (signed-macos MISSING)"
+                fi
+                ;;
+              *)
+                z="artifacts/zoekt-${t}"
+                c="artifacts/ctags-${t}"
+                if [ -d "$z" ] && [ -d "$c" ]; then
+                  stage="stage/${t}"; mkdir -p "$stage"
+                  cp "$z"/* "$stage"/
+                  cp "$c"/* "$stage"/
+                  chmod +x "$stage"/* || true
+                  case "$t" in
+                    windows-*) (cd stage && zip -r "../out/zoekt-ctags-${t}.zip" "$t") ;;
+                    *)         tar -czf "out/zoekt-ctags-${t}.tar.gz" -C stage "$t" ;;
+                  esac
+                else
+                  echo "::warning::skip ${t} (zoekt=$([ -d "$z" ] && echo ok || echo MISSING), ctags=$([ -d "$c" ] && echo ok || echo MISSING))"
+                fi
+                ;;
+            esac
           done
           ls -l out
       # universal-ctags is GPL-2.0-or-later and statically links LGPL-2.1+ libiconv (Windows).
@@ -375,11 +585,11 @@ jobs:
           cat "$BODY"
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: out/*
           body_path: ${{ github.workspace }}/RELEASE_BODY.md
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: release-bundles
           path: out/
