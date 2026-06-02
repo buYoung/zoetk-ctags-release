@@ -280,6 +280,19 @@ jobs:
             fi
           done
           ls -l out
+      # universal-ctags is GPL-2.0-or-later and statically links LGPL-2.1+ libiconv (Windows).
+      # GPLv2 section 3 / LGPL require shipping the corresponding source with the binaries.
+      # Attach the exact, unmodified upstream source tarballs we build from. See THIRD_PARTY_NOTICES.md.
+      - name: Fetch corresponding source (GPL/LGPL compliance)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -eux
+          curl -fL --retry 5 -o "out/SOURCE-ctags-${CTAGS_REF}.tar.gz" \
+            "https://codeload.github.com/universal-ctags/ctags/tar.gz/${CTAGS_REF}"
+          curl -fL --retry 5 -o "out/SOURCE-libiconv-1.17.tar.gz" \
+            "https://ftp.gnu.org/gnu/libiconv/libiconv-1.17.tar.gz"
+          curl -fL --retry 5 -o "out/SOURCE-jansson-2.15.0.tar.gz" \
+            "https://github.com/akheron/jansson/releases/download/v2.15.0/jansson-2.15.0.tar.gz"
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -294,6 +307,10 @@ jobs:
             built on macOS runners (no Linux->macOS cross here).
             Runtime-verified: linux-amd64/arm64, macos-amd64/arm64 (+ macos x86_64 via Rosetta).
             Build-verified only (runtime not yet tested on real hardware): windows-amd64, windows-arm64.
+
+            Licensing: this project is Apache-2.0; bundled universal-ctags is GPL-2.0-or-later
+            (with LGPL-2.1+ libiconv statically linked on Windows). Corresponding source is attached
+            as SOURCE-*.tar.gz. See THIRD_PARTY_NOTICES.md.
       - uses: actions/upload-artifact@v4
         with:
           name: release-bundles

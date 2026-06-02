@@ -1,99 +1,139 @@
 # zoekt-ctags-release
 
-[zoekt](https://github.com/sourcegraph/zoekt)(`zoekt-webserver`, `zoekt-git-index`, `zoekt-index`)와
-[universal-ctags](https://github.com/universal-ctags/ctags)를 **호스트에 그대로 두고 실행 가능한 정적
-바이너리**로 빌드하여, 플랫폼별 아카이브로 묶어 GitHub Release로 발행하는 저장소입니다.
+> [zoekt](https://github.com/sourcegraph/zoekt)와 [universal-ctags](https://github.com/universal-ctags/ctags)를
+> **호스트 배포용 정적 바이너리**로 빌드·패키징하는 멀티플랫폼 릴리스 저장소
 
-Docker 컨테이너를 운영에 쓸 수 없는 환경을 전제로 하며, 공식 컨테이너 이미지(`ghcr.io/sourcegraph/zoekt`)
-대신 직접 빌드·패키징합니다.
+![platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue)
+![arch](https://img.shields.io/badge/arch-x86__64%20%7C%20arm64-blue)
+![build](https://img.shields.io/badge/build-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
+![ctags](https://img.shields.io/badge/ctags-static%20%C2%B7%20%2Bjson%20%2Binteractive-success)
 
-## 무엇을 만드나
+**한국어** | [English](README.en.md)
 
-- **타깃 6종**: `linux`, `macos`, `windows` × `amd64`, `arm64`
-- **ctags**: 전 플랫폼 동일하게 `+json +interactive`만 포함하는 **minimal · self-contained · stripped** 빌드.
-  zoekt가 ctags를 JSON/interactive 모드로 호출하므로 `libjansson`은 필수(정적 링크). 그 외 의존성은
-  시스템 라이브러리뿐이라 추가 설치 없이 동작합니다.
-- **zoekt**: 순수 Go(`CGO_ENABLED=0`)라 단일 Linux 러너에서 전 타깃 크로스컴파일.
+Docker 컨테이너를 운영에 쓸 수 없는 환경을 전제로, 공식 컨테이너 이미지(`ghcr.io/sourcegraph/zoekt`) 대신
+zoekt 바이너리(`zoekt-webserver`, `zoekt-git-index`, `zoekt-index`)와 `universal-ctags`를 직접 빌드하여
+플랫폼별 아카이브로 묶어 GitHub Release로 발행합니다.
 
-## 왜 직접 빌드/벤더링하나
+## 목차
 
-- zoekt는 prebuilt 바이너리 릴리스도, semver 태그도 없습니다(커밋 SHA만 존재).
-- universal-ctags도 안정 버전 호스트 바이너리를 제공하지 않습니다(특히 Windows).
-- zoekt는 업스트림 상태로는 **Windows를 컴파일조차 못 합니다**(인덱스 mmap·`unix.Umask`가 Unix 전용).
-  Windows 지원은 미머지 [PR #941](https://github.com/sourcegraph/zoekt/pull/941)에만 있습니다.
+- [배경](#배경)
+- [특징](#특징)
+- [지원 현황](#지원-현황)
+- [빠른 시작](#빠른-시작)
+- [빌드 방식](#빌드-방식)
+- [버전 고정](#버전-고정)
+- [산출물](#산출물)
+- [런타임 요구사항](#런타임-요구사항)
+- [저장소 구조](#저장소-구조)
+- [라이선스](#라이선스)
 
-→ 그래서 zoekt 소스를 **이 저장소에 벤더링**하고(Windows 패치 적용 상태), ctags는 빌드 시점에 핀된 소스를
-가져와 빌드합니다. 자세한 출처·패치·업데이트 절차는 [`third_party/zoekt/VENDOR.md`](third_party/zoekt/VENDOR.md) 참고.
+## 배경
+
+이 저장소의 `zoekt + universal-ctags` 조합은, 코드 검색·분석 도구들(zoekt·ctags·LSP·AST 등)을 여러
+파이프라인으로 엮어 비교한 벤치마크에서 **`zoekt(텍스트 인덱스) + ctags(심볼 인덱스) → read` 조합이
+비용·속도·품질 균형이 가장 우수**하다는 결론에서 출발했습니다. 화려한 다단계 파이프라인보다 이 가벼운
+조합이 실용적으로 최적이라는 결과가, 바로 이 조합을 호스트 배포용 바이너리로 묶게 된 계기입니다.
+
+- 벤치마크 상세: [results-combos.md](https://github.com/buYoung/intellij-jsoninja/blob/main/evals/workflow-combos/results-combos.md) — [buYoung/intellij-jsoninja](https://github.com/buYoung/intellij-jsoninja)
+
+## 특징
+
+- **타깃 6종**: `linux` · `macos` · `windows` × `amd64` · `arm64`
+- **self-contained**: 시스템 라이브러리 외 추가 의존성 없음 (Linux는 musl 정적, macOS/Windows는 jansson 등 정적 링크)
+- **ctags 기능 통일**: 전 플랫폼 `+json +interactive`만 포함(minimal). zoekt 심볼 검색에 필요한 최소 세트이며,
+  `libjansson` 누락 시 검색이 조용히 깨지는 문제를 빌드 단계에서 차단
+- **stripped**: 디버그 심볼 제거로 용량 최소화
+- **단일 toolchain**: Windows ctags는 `llvm-mingw` 하나로 x86_64·arm64 모두 Linux에서 크로스 (MSVC·MSYS2·Windows 러너 불필요)
+- **재현 가능**: zoekt는 저장소에 벤더링, ctags 소스는 버전 핀
 
 ## 지원 현황
 
 | 타깃 | 빌드 | 런타임 검증 |
-|------|------|-------------|
-| linux-amd64 / linux-arm64 | ✅ | ✅ (인덱싱 + `sym:` 검색 E2E) |
-| macos-amd64 / macos-arm64 | ✅ | ✅ (E2E; Intel은 Rosetta 경유) |
-| windows-amd64 / windows-arm64 | ✅ | ⬜ **미검증** (실제 Windows 실행 미확인) |
+|------|:----:|:-----------:|
+| linux-amd64 / linux-arm64 | ✅ | ✅ 인덱싱 + `sym:` 검색 E2E |
+| macos-amd64 / macos-arm64 | ✅ | ✅ E2E (Intel은 Rosetta 경유) |
+| windows-amd64 / windows-arm64 | ✅ | ⬜ **미검증** |
 
-> Windows는 **빌드·self-contained까지만 검증**됐습니다. zoekt.exe는 미머지 PR #941에 의존하므로,
-> 실제 인덱싱/서빙 동작은 Windows 실기 또는 Wine으로 별도 검증이 필요합니다.
+> **Windows 런타임 주의**: 빌드와 self-contained는 검증됐지만, zoekt의 Windows 지원은 미머지
+> [PR #941](https://github.com/sourcegraph/zoekt/pull/941)에 의존합니다. 실제 인덱싱/서빙 동작은 Windows
+> 실기 또는 Wine으로 별도 확인이 필요합니다.
 
-## 빌드 방식
-
-| 컴포넌트 | 방식 |
-|----------|------|
-| zoekt (전 타깃) | 벤더 소스(`third_party/zoekt`)를 Go로 크로스컴파일 (Linux 단일 러너) |
-| ctags (linux) | Alpine(musl)에서 정적 빌드 → 어느 배포판에서도 동작 |
-| ctags (macos) | macOS 러너에서 소스 jansson 정적 링크 (Linux→macOS 크로스는 안 함) |
-| ctags (windows) | **단일 `llvm-mingw` toolchain**으로 Linux에서 x86_64·arm64 크로스 (MSVC·MSYS2·Windows 러너 불필요) |
-
-ctags의 minimal 기능 세트는 `PKG_CONFIG_LIBDIR`을 빈/스코핑된 디렉터리로 지정해 yaml/pcre2/xml2
-자동탐지를 차단하고 jansson만 정적 링크하는 방식으로 전 플랫폼 통일합니다.
-
-## 사용법
+## 빠른 시작
 
 ### 릴리스 발행
 
-태그를 push하면 빌드 → 패키징 → GitHub Release 업로드가 진행됩니다.
+태그를 push하면 빌드 → 패키징 → GitHub Release 업로드가 자동 진행됩니다.
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
-빌드만 확인하려면 Actions 탭에서 `workflow_dispatch`로 수동 실행하세요(릴리스 없이 아티팩트만 생성).
+릴리스 없이 빌드만 확인하려면 Actions 탭에서 `workflow_dispatch`로 수동 실행하세요.
 
-### 버전 고정
+### 로컬 검증 (선택)
 
-- **zoekt**: 벤더링된 소스가 곧 핀입니다. 업스트림을 새 SHA로 올리려면 `third_party/zoekt/VENDOR.md`의 절차를 따르세요.
-- **ctags**: `.github/workflows/release.yml` 상단 `env`의 `CTAGS_REF` / `CTAGS_TARBALL_DIR`로 고정합니다.
-
-### 로컬 검증 (act, 선택)
-
-[`act`](https://github.com/nektos/act)로 Linux 잡을 로컬에서 미리 돌려볼 수 있습니다(Docker 필요). macOS·Windows
-잡은 act가 실행할 수 없습니다. 자세한 한계는 [`.actrc`](.actrc) 주석 참고.
+[`act`](https://github.com/nektos/act)로 Linux 잡을 로컬에서 미리 실행할 수 있습니다(Docker 필요).
+macOS·Windows 잡은 act가 실행할 수 없습니다. 한계는 [`.actrc`](.actrc) 주석 참고.
 
 ```bash
 act -j build-zoekt        # zoekt 크로스컴파일
 act -j build-ctags-linux  # Alpine musl 정적 빌드 + jansson 검증
 ```
 
+## 빌드 방식
+
+| 컴포넌트 | 방식 |
+|----------|------|
+| zoekt (전 타깃) | 벤더 소스(`third_party/zoekt`)를 Go로 크로스컴파일 — `CGO_ENABLED=0`, Linux 단일 러너 |
+| ctags (linux) | Alpine(musl)에서 정적 빌드 → 배포판 무관 동작 |
+| ctags (macos) | macOS 러너에서 소스 jansson 정적 링크 |
+| ctags (windows) | **`llvm-mingw` 단일 toolchain**으로 Linux에서 x86_64·arm64 크로스 |
+
+ctags의 minimal 기능 세트는 `PKG_CONFIG_LIBDIR`을 스코핑해 yaml/pcre2/xml2 자동탐지를 차단하고 jansson만
+정적 링크하는 방식으로 전 플랫폼 통일합니다.
+
+> zoekt는 업스트림 상태로는 **Windows를 컴파일조차 못 합니다**(인덱스 mmap·`unix.Umask`가 Unix 전용).
+> 그래서 Windows 지원 패치(PR #941)를 적용한 소스를 [`third_party/zoekt`](third_party/zoekt)에 벤더링합니다.
+
+## 버전 고정
+
+- **zoekt**: 벤더링된 소스가 곧 핀입니다. 새 SHA로 올리는 절차는 [`third_party/zoekt/VENDOR.md`](third_party/zoekt/VENDOR.md) 참고.
+- **ctags**: [`.github/workflows/release.yml`](.github/workflows/release.yml) 상단 `env`의 `CTAGS_REF` / `CTAGS_TARBALL_DIR`로 고정.
+
 ## 산출물
 
 플랫폼별로 zoekt 3종 + `universal-ctags`(Windows는 `.exe`)가 하나의 아카이브로 묶입니다.
 
-- Unix: `zoekt-ctags-<os>-<arch>.tar.gz`
-- Windows: `zoekt-ctags-<os>-<arch>.zip`
+| OS | 아카이브 |
+|----|----------|
+| Linux / macOS | `zoekt-ctags-<os>-<arch>.tar.gz` |
+| Windows | `zoekt-ctags-<os>-<arch>.zip` |
 
-## 런타임 주의사항
+## 런타임 요구사항
 
-- **`git` 필요**: `zoekt-git-index`는 호스트의 `git` 실행 파일을 호출합니다. 배포 호스트에 git이 있어야 합니다.
-- **macOS Gatekeeper**: 산출 바이너리는 서명/노터라이즈되어 있지 않습니다. macOS에서 "확인되지 않은 개발자"
-  차단이 뜰 수 있습니다(`xattr -dr com.apple.quarantine` 또는 codesign/notarization 별도 적용).
-- **Windows 런타임 미검증**: 위 "지원 현황" 참고. 빌드는 되나 실제 동작은 미확인입니다.
+- **`git`**: `zoekt-git-index`는 호스트의 `git` 실행 파일을 호출하므로 배포 호스트에 git이 설치돼 있어야 합니다.
+- **macOS Gatekeeper**: 산출 바이너리는 서명/노터라이즈되어 있지 않습니다. 차단 시 `xattr -dr com.apple.quarantine`
+  또는 codesign/notarization을 별도 적용하세요.
+- **Windows**: 런타임 미검증 — 위 [지원 현황](#지원-현황) 참고.
 
 ## 저장소 구조
 
 ```
-.github/workflows/release.yml   # 빌드·패키징·릴리스 워크플로
-third_party/zoekt/              # 벤더링된 zoekt 소스 (+ Windows 패치) + VENDOR.md
+.github/workflows/release.yml   # 빌드 · 패키징 · 릴리스 워크플로
+third_party/zoekt/              # 벤더링된 zoekt 소스(+ Windows 패치) + VENDOR.md
 patches/                        # 업스트림 대비 divergence(Windows 지원 패치)
 .actrc                          # act 로컬 실행용 러너 매핑
 ```
+
+## 라이선스
+
+- **이 저장소 자체**(워크플로·문서·패치): [Apache-2.0](LICENSE)
+- 배포되는 바이너리는 각 원 프로젝트 라이선스를 따릅니다:
+  - zoekt — Apache-2.0 (소스는 `third_party/zoekt`에 벤더링)
+  - **universal-ctags — GPL-2.0-or-later** (Windows 빌드는 LGPL-2.1+ libiconv를 정적 링크)
+  - jansson — MIT
+
+> universal-ctags는 카피레프트(GPL)입니다. 번들 구성요소 목록과 GPL/LGPL **대응 소스 제공 의무**는
+> [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 정리돼 있으며, 각 릴리스에 소스 tarball(`SOURCE-*.tar.gz`)이 첨부됩니다.
+> zoekt는 ctags를 서브프로세스로 호출하는 별도 프로그램이라 GPL 전염 없이 Apache-2.0를 유지합니다.
