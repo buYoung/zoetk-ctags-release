@@ -9,6 +9,10 @@ see the "Publish a release" section in the README.
 
 ## [Unreleased]
 
+### Fixed
+
+- The release now includes the Linux arm64 and macOS archives that were missing from 0.0.1, so all six platform targets (Linux/macOS/Windows on amd64 and arm64) are published together.
+
 ## [0.0.1] - 2026-06-02
 
 ### Added

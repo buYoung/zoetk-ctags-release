@@ -13,6 +13,9 @@
  * - 버전 bump/태그/푸시는 release-it이 담당하므로 이 스크립트는 버전 파일을 건드리지 않습니다.
  * - [Unreleased] -> [X.Y.Z] 변환도 release-it의 @release-it/keep-a-changelog가 수행합니다.
  *   (그래서 codex는 버전 무관 섹션에만 쓰고, 버전 섹션을 직접 만들지 않습니다.)
+ * - [Unreleased]에 이미 사람이 쓴 항목이 있으면 codex를 건너뜁니다(사람 작성 항목 보호).
+ *   codex가 커밋 메타데이터만으로는 추론하지 못하는 변경(예: 빠졌던 플랫폼을 복구하는
+ *   CI 전용 수정)은 직접 작성해 두면 그대로 릴리스에 사용됩니다.
  * - dry-run에서는 release-it이 before:init hook을 실행하지 않으므로 이 스크립트도 돌지 않습니다.
  *
  * 직접 실행도 가능: node scripts/update-changelog-with-codex.cjs [baseTag]
@@ -83,6 +86,20 @@ function getChangelogReference() {
 
 function getChangelogText() {
   return fs.readFileSync(path.join(rootDirectory, "CHANGELOG.md"), "utf8");
+}
+
+// "## [Unreleased]" 헤딩 다음부터 다음 "## [" 헤딩(또는 파일 끝) 전까지의 본문을
+// 공백 제거해 돌려줍니다. 비어 있지 않으면 사람이 이미 항목을 써둔 것으로 간주합니다.
+function getUnreleasedBody() {
+  const changelog = getChangelogText();
+  const heading = /^## \[Unreleased\][^\n]*$/im.exec(changelog);
+  if (!heading) {
+    return "";
+  }
+  const afterHeading = changelog.slice(heading.index + heading[0].length);
+  const nextHeading = /^## \[/m.exec(afterHeading);
+  const body = nextHeading ? afterHeading.slice(0, nextHeading.index) : afterHeading;
+  return body.trim();
 }
 
 function buildPrompt(baseTag, commitSummary, changelogReference) {
@@ -231,6 +248,13 @@ function assertCodexChangedOnlyChangelog(dirtyBefore) {
   }
   console.error("Only CHANGELOG.md may be changed during changelog generation.");
   process.exit(1);
+}
+
+// 사람이 이미 [Unreleased]에 항목을 작성해 둔 경우 codex를 아예 실행하지 않습니다.
+// (codex가 추론할 수 없는 변경을 직접 쓴 릴리스에서, 그 항목을 codex가 건드릴 위험 제거.)
+if (getUnreleasedBody()) {
+  console.log('CHANGELOG.md "[Unreleased]" already has hand-written entries; skipping codex. release-it will use them as-is.');
+  process.exit(0);
 }
 
 const baseTag = resolveBaseTag();
