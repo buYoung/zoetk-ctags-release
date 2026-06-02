@@ -66,7 +66,13 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # universal-ctags on Linux: fully static (musl) so it runs on any distro.
-  # Native build on amd64 / arm64 runners -> feature check runs in-place.
+  # The build runs inside Alpine via `docker run` -- NOT a job-level `container:`.
+  # Why: a job-level Alpine container forces EVERY step (including the JS-based
+  # actions/upload-artifact) to run in musl, and the runner only ships a musl
+  # Node (node20_alpine) for x64. On ubuntu-24.04-arm that fails hard with
+  # "JavaScript Actions in Alpine containers are only supported on x64 Linux
+  # runners." Keeping Alpine at the STEP level means only the build is in musl;
+  # upload-artifact runs on the host (glibc Node, available on both arches).
   # ---------------------------------------------------------------------------
   build-ctags-linux:
     strategy:
@@ -76,37 +82,38 @@ jobs:
           - { target: linux-amd64, runner: ubuntu-24.04 }
           - { target: linux-arm64, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
-    container: alpine:3.20
     steps:
-      - name: Install build deps
-        run: |
-          # libc6-compat/gcompat: JS-based GitHub actions ship a glibc Node;
-          # they fail to run in a pure-musl Alpine container without these.
-          apk add --no-cache libc6-compat gcompat \
-            autoconf automake binutils g++ gcc make \
-            pkgconfig curl tar xz jansson-dev jansson-static
-      - name: Build static universal-ctags (minimal, stripped)
+      - name: Build + verify static universal-ctags in Alpine (musl)
         run: |
           set -eux
-          curl -fL --retry 5 \
-            "https://codeload.github.com/universal-ctags/ctags/tar.gz/${CTAGS_REF}" \
-            | tar xz
-          cd "${CTAGS_TARBALL_DIR}"
-          ./autogen.sh
-          # Only jansson dev/static is installed (no libyaml/pcre2/libxml2), so the
-          # feature set stays minimal: +json +interactive -- matching every other
-          # platform (parity). zoekt only needs json+interactive.
-          LDFLAGS="-static" ./configure \
-            --prefix="${GITHUB_WORKSPACE}/out" \
-            --program-prefix=universal- --enable-json --disable-readcmd
-          make -j"$(nproc)"
-          make install
-          strip "${GITHUB_WORKSPACE}/out/bin/universal-ctags"
-      - name: Verify jansson + interactive support
-        run: |
-          set -eux
-          "${GITHUB_WORKSPACE}/out/bin/universal-ctags" --list-features | grep -wq json
-          "${GITHUB_WORKSPACE}/out/bin/universal-ctags" --list-features | grep -wq interactive
+          # CTAGS_REF/CTAGS_TARBALL_DIR are expanded by the host shell into -e,
+          # then re-expanded inside the container (single-quoted inner script).
+          docker run --rm \
+            -e CTAGS_REF="${CTAGS_REF}" \
+            -e CTAGS_TARBALL_DIR="${CTAGS_TARBALL_DIR}" \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work \
+            alpine:3.20 sh -eux -c '
+              apk add --no-cache \
+                autoconf automake binutils g++ gcc make \
+                pkgconfig curl tar xz jansson-dev jansson-static
+              curl -fL --retry 5 \
+                "https://codeload.github.com/universal-ctags/ctags/tar.gz/${CTAGS_REF}" \
+                | tar xz
+              cd "${CTAGS_TARBALL_DIR}"
+              ./autogen.sh
+              # Only jansson dev/static is installed (no libyaml/pcre2/libxml2), so the
+              # feature set stays minimal: +json +interactive -- matching every other
+              # platform (parity). zoekt only needs json+interactive.
+              LDFLAGS="-static" ./configure \
+                --prefix=/work/out \
+                --program-prefix=universal- --enable-json --disable-readcmd
+              make -j"$(nproc)"
+              make install
+              strip /work/out/bin/universal-ctags
+              # Verify jansson + interactive support in-place (still inside musl Alpine).
+              /work/out/bin/universal-ctags --list-features | grep -wq json
+              /work/out/bin/universal-ctags --list-features | grep -wq interactive
+            '
       - uses: actions/upload-artifact@v4
         with:
           name: ctags-${{ matrix.target }}
