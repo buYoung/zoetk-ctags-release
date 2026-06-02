@@ -19,6 +19,12 @@ env:
   CTAGS_REF: v6.1.0
   CTAGS_TARBALL_DIR: ctags-6.1.0
 
+# Least-privilege default for GITHUB_TOKEN: every job is read-only unless it opts
+# up. Only package-and-release elevates to `contents: write` (to create the
+# Release). Don't rely on the repo-default token scope, which isn't visible here.
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # zoekt: pure-Go (CGO_ENABLED=0) -> cross-compile all 6 targets from a single
@@ -390,6 +396,9 @@ jobs:
             done < <(security list-keychains -d user)
             security list-keychains -d user -s "$KEYCHAIN_PATH" "${existing[@]}"
           fi
+          # xtrace OFF around secret-bearing commands so the keychain password never
+          # reaches the build log (defense in depth beyond GitHub's secret masking).
+          set +x
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           # Grant codesign non-interactive access to the private key. WITHOUT this a
@@ -397,6 +406,7 @@ jobs:
           # interaction is not allowed" (it never shows a GUI prompt). Idempotent.
           security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s \
             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          set -x
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
       - name: Codesign (Developer ID + hardened runtime)
         env:
@@ -410,8 +420,18 @@ jobs:
         run: |
           set -eux
           cd "${GITHUB_WORKSPACE}/sign"
-          for b in *; do
-            [ -f "$b" ] || continue
+          # Sign ONLY the 4 expected binaries (don't codesign+notarize a stray/foreign
+          # file that slipped into the dir), and confirm each is a Mach-O of this
+          # cell's arch first -- a trust gate on artifacts this job didn't build.
+          case "${{ matrix.target }}" in
+            macos-amd64) want_arch=x86_64 ;;
+            macos-arm64) want_arch=arm64 ;;
+            *) echo "unexpected target ${{ matrix.target }}" >&2; exit 1 ;;
+          esac
+          for b in zoekt-webserver zoekt-git-index zoekt-index universal-ctags; do
+            [ -f "$b" ] || { echo "missing expected binary: $b" >&2; exit 1; }
+            lipo -archs "$b" | grep -qw "$want_arch" \
+              || { echo "$b is not a $want_arch Mach-O" >&2; exit 1; }
             # --timestamp (secure timestamp) + --options runtime (hardened runtime)
             # are both REQUIRED for notarization. strip already ran in the build job;
             # signing must be the last mutation or it invalidates the signature.
@@ -430,11 +450,14 @@ jobs:
           ZIP="${RUNNER_TEMP}/${{ matrix.target }}-notarize.zip"
           rm -f "$ZIP"
           ditto -c -k "${GITHUB_WORKSPACE}/sign" "$ZIP"
+          # xtrace OFF: keep Apple ID / app-specific password / team ID out of the log.
+          set +x
           xcrun notarytool submit "$ZIP" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
             --wait
+          set -x
           # No `stapler staple`: loose executables aren't a staple-able container.
       - uses: actions/upload-artifact@v6
         with:
@@ -585,7 +608,9 @@ jobs:
           cat "$BODY"
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v3
+        # SHA-pinned (third-party action with contents:write): mutable tags can be
+        # re-pointed on upstream compromise. Bump via Dependabot/Renovate.
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
         with:
           files: out/*
           body_path: ${{ github.workspace }}/RELEASE_BODY.md
