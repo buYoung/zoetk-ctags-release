@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@release-it/keep-a-changelog':
+        specifier: ^7.1.0
+        version: 7.1.0(release-it@20.2.0)
       release-it:
         specifier: ^20.2.0
         version: 20.2.0
@@ -204,6 +207,12 @@ packages:
     resolution: {integrity: sha512-oeQJs1aa8Ghke8JIK9yuq/+KjMiaYeDZ38jx7MhkXncXlUKjqQ3wEm2X3qCKyjo+ZZofZj+WsEEiqkTtRuE2xQ==}
     engines: {node: ^20.9.0 || >=22.0.0, npm: '>=10.8.2'}
 
+  '@release-it/keep-a-changelog@7.1.0':
+    resolution: {integrity: sha512-WJlUHdeRGADe0zNAWmB6cF+yvSG8MnME6QX7RExFemnVk1CKyhppVpGXeAFCeFYuD69PnwGnmUMaBpeCD5O2pw==}
+    engines: {node: ^20.9.0 || >=22.0.0}
+    peerDependencies:
+      release-it: ^18.0.0 || ^19.0.0 || ^20.0.0
+
   '@types/parse-path@7.1.0':
     resolution: {integrity: sha512-EULJ8LApcVEPbrfND0cRQqutIOdiIgJ1Mgrhpy755r14xMohPTEpkV/k28SJvuOs9bHRFW8x+KeDAEPiGQPB9Q==}
     deprecated: This is a stub types definition. parse-path provides its own type definitions, so you do not need this installed.
@@ -322,6 +331,10 @@ packages:
 
   destr@2.0.5:
     resolution: {integrity: sha512-ugFTXCtDZunbzasqBxrK93Ik/DRYsO6S/fedkWEMKqt04xZ4csmnmwGDBAb07QWNaGMAmnTIemsYZCksjATwsA==}
+
+  detect-newline@4.0.1:
+    resolution: {integrity: sha512-qE3Veg1YXzGHQhlA6jzebZN2qVf6NX+A7m7qlhCGG30dJixrAQhYOsJjsnBjJkCSmuOPpCk30145fr8FV0bzog==}
+    engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
 
   dotenv@17.4.2:
     resolution: {integrity: sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw==}
@@ -635,6 +648,9 @@ packages:
     resolution: {integrity: sha512-eCPu1qRxPVkl5605OTWF8Wz40b4Mf45NY5LQmVPQ599knfs5QhASUm9GbJ5BDMDOXgrnh0wyEdvzmL//YMlw0A==}
     engines: {node: '>=18'}
 
+  string-template@1.0.0:
+    resolution: {integrity: sha512-SLqR3GBUXuoPP5MmYtD7ompvXiG87QjT6lzOszyXjTM86Uu7At7vNnt2xgyTLq5o9T4IxTYFyGxcULqpsmsfdg==}
+
   string-width@8.2.1:
     resolution: {integrity: sha512-IIaP0g3iy9Cyy18w3M9YcaDudujEAVHKt3a3QJg1+sr/oX96TbaGUubG0hJyCjCBThFH+tFpcIyoUHUn1ogaLA==}
     engines: {node: '>=20'}
@@ -846,6 +862,13 @@ snapshots:
 
   '@phun-ky/typeof@2.0.3': {}
 
+  '@release-it/keep-a-changelog@7.1.0(release-it@20.2.0)':
+    dependencies:
+      detect-newline: 4.0.1
+      release-it: 20.2.0
+      semver: 7.7.4
+      string-template: 1.0.0
+
   '@types/parse-path@7.1.0':
     dependencies:
       parse-path: 7.1.0
@@ -940,6 +963,8 @@ snapshots:
       quickjs-wasi: 0.0.1
 
   destr@2.0.5: {}
+
+  detect-newline@4.0.1: {}
 
   dotenv@17.4.2: {}
 
@@ -1267,6 +1292,8 @@ snapshots:
     optional: true
 
   stdin-discarder@0.3.2: {}
+
+  string-template@1.0.0: {}
 
   string-width@8.2.1:
     dependencies:

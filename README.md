@@ -62,24 +62,26 @@ zoekt 바이너리(`zoekt-webserver`, `zoekt-git-index`, `zoekt-index`)와 `univ
 
 ### 릴리스 발행
 
-버전 증가·태깅·push는 [release-it](https://github.com/release-it/release-it)으로 수행합니다(반자동화 통제형).
+changelog 작성(codex)과 버전 증가·태깅·push(release-it)를 **`pnpm release` 한 번**에 통제형으로 수행합니다.
+`pnpm release`를 실행하면 대화형으로 다음이 진행됩니다:
 
-1. **changelog 작성** — codex로 `CHANGELOG.md`의 새 버전 섹션을 작성하고 검토합니다.
-2. **release-it 실행** — `pnpm release`를 실행하면 대화형으로 버전 선택 → 커밋(`chore: release vX.Y.Z`) → `vX.Y.Z` 태그 → push를 **각 단계 확인 후** 진행합니다.
+1. **changelog 생성 (codex)** — 시작 시 codex가 마지막 태그 이후 커밋을 분석해 `CHANGELOG.md`의 `## [Unreleased]`에 **사용자(배포 바이너리를 받아 실행하는 사람) 관점**의 영문 항목을 작성합니다. 구현 세부·파일 경로·커밋 해시 등은 제외됩니다. (codex CLI 필요)
+2. **버전 선택** — 증가량(patch/minor/major)이나 버전을 고릅니다. release-it이 생성된 changelog를 미리 보여줍니다.
+3. **확인 (yes 게이트)** — release-it이 **커밋 → 태그 → push를 각각 yes/no로** 묻습니다. 커밋 프롬프트에서 changelog를 검토하고 yes 하면, keep-a-changelog가 `## [Unreleased]`를 `## [X.Y.Z] - 날짜`로 변환해 커밋(`chore: release vX.Y.Z`)합니다.
+4. **CI 자동 진행** — push된 `vX.Y.Z` 태그가 빌드 → 패키징 → GitHub Release 생성을 트리거합니다. 릴리스 본문에는 해당 버전 changelog가 먼저 들어가고, 빌드·무결성·라이선스 노트가 이어집니다.
 
 ```bash
-pnpm install        # 최초 1회 (release-it 설치)
-pnpm release        # 대화형 릴리스 (각 단계 확인)
+pnpm install        # 최초 1회 (release-it 등 도구 설치)
+pnpm release        # codex 생성 + 대화형 릴리스 (커밋/태그/push 각각 yes 확인)
 pnpm release minor  # 증가량 명시 (patch / minor / major)
 pnpm release 0.1.0  # 버전 직접 지정 (첫 릴리스 권장)
-pnpm release:dry    # 변경 없이 동작만 미리보기
 ```
 
-3. **CI 자동 진행** — push된 `vX.Y.Z` 태그가 빌드 → 패키징 → GitHub Release 생성을 트리거합니다. 릴리스 본문에는 `CHANGELOG.md`의 해당 버전 섹션이 먼저 들어가고, 빌드·무결성·라이선스 노트가 이어집니다.
-
-> changelog는 release-it이 자동 생성하지 않습니다(codex가 작성·검토). release-it은 버전·태그·push만 담당하고,
-> GitHub Release는 CI가 단독으로 생성합니다(이중 생성 방지). `git add . --update`는 추적 중인 변경만 담으므로
-> release 전 `CHANGELOG.md` 외 불필요한 변경은 정리하세요.
+> - changelog 내용은 codex가 작성하고 사람이 검토합니다(자동 생성 아님). release-it은 버전·태그·push와
+>   `[Unreleased] → [버전]` 변환만 담당하고, GitHub Release는 CI가 단독으로 생성합니다(이중 생성 방지).
+> - 커밋 프롬프트에서 **no**를 선택하면, 이미 `## [X.Y.Z]`로 변환된 `CHANGELOG.md`와 bump된 `package.json`이 남습니다.
+>   `git checkout -- CHANGELOG.md package.json`로 되돌리세요. 다시 `pnpm release`하면 codex가 changelog를 새로 생성합니다.
+> - `git add . --update`는 추적 중인 변경만 담으므로 release 전 다른 변경은 정리하세요.
 
 릴리스 없이 빌드만 확인하려면 Actions 탭에서 `workflow_dispatch`로 수동 실행하세요.
 수동 태깅(`git tag vX.Y.Z && git push origin vX.Y.Z`)도 동일하게 CI를 트리거합니다(이 경우 changelog는 codex 검토 없이 `CHANGELOG.md` 상태 그대로 반영).
@@ -156,8 +158,9 @@ sha256sum --ignore-missing -c SHA256SUMS
 .github/workflows/release.yml   # 빌드 · 패키징 · 릴리스 워크플로
 third_party/zoekt/              # 벤더링된 zoekt 소스(+ Windows 패치) + VENDOR.md
 patches/                        # 업스트림 대비 divergence(Windows 지원 패치)
-.release-it.json                # release-it 설정 (버전·태그·push 담당; GitHub Release는 CI)
+.release-it.json                # release-it 설정 (버전·태그·push + [Unreleased]→[버전] 변환 + codex hook)
 CHANGELOG.md                    # 릴리스 노트 (codex 작성·검토, CI가 릴리스 본문에 주입)
+scripts/                        # update-changelog-with-codex.cjs — release-it before:init hook에서 codex 실행
 package.json                    # pnpm + release-it 도구 정의 (private, npm 미발행)
 .actrc                          # act 로컬 실행용 러너 매핑
 ```

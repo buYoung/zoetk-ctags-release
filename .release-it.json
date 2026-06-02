@@ -13,5 +13,16 @@
   },
   "github": {
     "release": false
+  },
+  "hooks": {
+    "before:init": "node scripts/update-changelog-with-codex.cjs"
+  },
+  "plugins": {
+    "@release-it/keep-a-changelog": {
+      "filename": "CHANGELOG.md",
+      "addUnreleased": true,
+      "keepUnreleased": false,
+      "strictLatest": false
+    }
   }
 }

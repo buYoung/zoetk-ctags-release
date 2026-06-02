@@ -10,6 +10,7 @@
     "release:dry": "release-it --dry-run"
   },
   "devDependencies": {
+    "@release-it/keep-a-changelog": "^7.1.0",
     "release-it": "^20.2.0"
   }
 }
