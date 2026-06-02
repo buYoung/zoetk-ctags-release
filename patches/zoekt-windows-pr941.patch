@@ -1,0 +1,305 @@
+diff --git a/cmd/zoekt-webserver/main.go b/cmd/zoekt-webserver/main.go
+index d9e5c57..2849022 100644
+--- a/cmd/zoekt-webserver/main.go
++++ b/cmd/zoekt-webserver/main.go
+@@ -32,6 +32,7 @@ import (
+ 	"os"
+ 	"os/signal"
+ 	"path/filepath"
++	"runtime"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+@@ -45,7 +46,6 @@ import (
+ 	"github.com/uber/jaeger-client-go"
+ 	oteltrace "go.opentelemetry.io/otel/trace"
+ 	"go.uber.org/automaxprocs/maxprocs"
+-	"golang.org/x/sys/unix"
+ 	"google.golang.org/grpc"
+ 
+ 	"github.com/sourcegraph/zoekt"
+@@ -351,8 +351,8 @@ func addProxyHandler(mux *http.ServeMux, socket string) {
+ // times you will read the channel (used as buffer for signal.Notify).
+ func shutdownSignalChan(maxReads int) <-chan os.Signal {
+ 	c := make(chan os.Signal, maxReads)
+-	signal.Notify(c, os.Interrupt) // terminal C-c and goreman
+-	signal.Notify(c, unix.SIGTERM) // Kubernetes
++	signal.Notify(c, os.Interrupt)     // terminal C-c and goreman
++	signal.Notify(c, PLATFORM_SIGTERM) // Kubernetes
+ 	return c
+ }
+ 
+@@ -461,13 +461,28 @@ Possible remediations:
+ 	}
+ }
+ 
++func diskUsage(path string) (*disk.UsageStat, error) {
++	duPath := path
++	if runtime.GOOS == "windows" {
++		duPath = filepath.VolumeName(duPath)
++	}
++	usage, err := disk.Usage(duPath)
++	if err != nil {
++		return nil, fmt.Errorf("diskUsage: %w", err)
++	}
++	return usage, err
++}
++
+ func mustRegisterDiskMonitor(path string) {
+ 	prometheus.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+ 		Name:        "src_disk_space_available_bytes",
+ 		Help:        "Amount of free space disk space.",
+ 		ConstLabels: prometheus.Labels{"path": path},
+ 	}, func() float64 {
+-		usage, _ := disk.Usage(path)
++		// I know there is no error handling here, and I don't like it
++		// but there was no error handling in the previous version
++		// that used Statfs, either, so I'm assuming there's no need for it
++		usage, _ := diskUsage(path)
+ 		return float64(usage.Free)
+ 	}))
+ 
+@@ -476,7 +491,10 @@ func mustRegisterDiskMonitor(path string) {
+ 		Help:        "Amount of total disk space.",
+ 		ConstLabels: prometheus.Labels{"path": path},
+ 	}, func() float64 {
+-		usage, _ := disk.Usage(path)
++		// I know there is no error handling here, and I don't like it
++		// but there was no error handling in the previous version
++		// that used Statfs, either, so I'm assuming there's no need for it
++		usage, _ := diskUsage(path)
+ 		return float64(usage.Total)
+ 	}))
+ }
+diff --git a/cmd/zoekt-webserver/main_unix.go b/cmd/zoekt-webserver/main_unix.go
+new file mode 100644
+index 0000000..cdcc52a
+--- /dev/null
++++ b/cmd/zoekt-webserver/main_unix.go
+@@ -0,0 +1,9 @@
++//go:build !windows
++
++package main
++
++import (
++	platform "golang.org/x/sys/unix"
++)
++
++const PLATFORM_SIGTERM = platform.SIGTERM
+diff --git a/cmd/zoekt-webserver/main_windows.go b/cmd/zoekt-webserver/main_windows.go
+new file mode 100644
+index 0000000..0227ee7
+--- /dev/null
++++ b/cmd/zoekt-webserver/main_windows.go
+@@ -0,0 +1,23 @@
++// Copyright 2016 Google Inc. All rights reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package main
++
++import (
++	platform "golang.org/x/sys/windows"
++)
++
++const PLATFORM_SIGTERM = platform.SIGTERM
++
++// Memory map metrics are provided in metrics_nonlinux.go
+diff --git a/cmd/zoekt-webserver/metrics.go b/cmd/zoekt-webserver/metrics_linux.go
+similarity index 100%
+rename from cmd/zoekt-webserver/metrics.go
+rename to cmd/zoekt-webserver/metrics_linux.go
+diff --git a/cmd/zoekt-webserver/metrics_nonlinux.go b/cmd/zoekt-webserver/metrics_nonlinux.go
+new file mode 100644
+index 0000000..5412363
+--- /dev/null
++++ b/cmd/zoekt-webserver/metrics_nonlinux.go
+@@ -0,0 +1,17 @@
++//go:build !linux
++
++package main
++
++import (
++	sglog "github.com/sourcegraph/log"
++)
++
++func mustRegisterMemoryMapMetrics(logger sglog.Logger) {
++	// The memory map metrics are collected via /proc, which
++	// is only available on linux-based operating systems.
++
++	// Other platforms do not have the same virtual memory statistics as Linux.
++	// For example, Windows does not have the concept of
++	// a count of memory maps, and a max number of memory maps
++	return
++}
+diff --git a/index/builder.go b/index/builder.go
+index 41e8968..a61e69f 100644
+--- a/index/builder.go
++++ b/index/builder.go
+@@ -38,7 +38,6 @@ import (
+ 	"github.com/bmatcuk/doublestar"
+ 	"github.com/dustin/go-humanize"
+ 	"github.com/rs/xid"
+-	"golang.org/x/sys/unix"
+ 
+ 	"maps"
+ 
+@@ -1125,8 +1124,3 @@ func (e *deltaIndexOptionsMismatchError) Error() string {
+ 
+ // umask holds the Umask of the current process
+ var umask os.FileMode
+-
+-func init() {
+-	umask = os.FileMode(unix.Umask(0))
+-	unix.Umask(int(umask))
+-}
+diff --git a/index/builder_unix.go b/index/builder_unix.go
+new file mode 100644
+index 0000000..45f772f
+--- /dev/null
++++ b/index/builder_unix.go
+@@ -0,0 +1,14 @@
++//go:build !windows
++
++package index
++
++import (
++	"os"
++
++	"golang.org/x/sys/unix"
++)
++
++func init() {
++	umask = os.FileMode(unix.Umask(0))
++	unix.Umask(int(umask))
++}
+diff --git a/index/builder_windows.go b/index/builder_windows.go
+new file mode 100644
+index 0000000..38ac9a5
+--- /dev/null
++++ b/index/builder_windows.go
+@@ -0,0 +1,22 @@
++// Copyright 2018 Google Inc. All rights reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package index
++
++// No OS-specific imports needed
++
++func init() {
++	// no setting of file permissions on Windows
++	umask = 0
++}
+diff --git a/index/indexfile_windows.go b/index/indexfile_windows.go
+new file mode 100644
+index 0000000..2ffed7b
+--- /dev/null
++++ b/index/indexfile_windows.go
+@@ -0,0 +1,60 @@
++// Copyright 2016 Google Inc. All rights reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package index
++
++import (
++	"fmt"
++	"math"
++	"os"
++)
++
++// NewIndexFile returns a new index file. The index file takes
++// ownership of the passed in file, and may close it.
++func NewIndexFile(f *os.File) (IndexFile, error) {
++	return &indexFileFromOS{f}, nil
++}
++
++type indexFileFromOS struct {
++	f *os.File
++}
++
++func (f *indexFileFromOS) Read(off, sz uint32) ([]byte, error) {
++	r := make([]byte, sz)
++	_, err := f.f.ReadAt(r, int64(off))
++	return r, err
++}
++
++func (f indexFileFromOS) Size() (uint32, error) {
++	fi, err := f.f.Stat()
++	if err != nil {
++		return 0, err
++	}
++
++	sz := fi.Size()
++
++	if sz >= math.MaxUint32 {
++		return 0, fmt.Errorf("overflow")
++	}
++
++	return uint32(sz), nil
++}
++
++func (f indexFileFromOS) Close() {
++	f.f.Close()
++}
++
++func (f indexFileFromOS) Name() string {
++	return f.f.Name()
++}
+diff --git a/index/tombstones_windows.go b/index/tombstones_windows.go
+new file mode 100644
+index 0000000..56b4b92
+--- /dev/null
++++ b/index/tombstones_windows.go
+@@ -0,0 +1,20 @@
++// Copyright 2018 Google Inc. All rights reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package index
++
++func init() {
++	// no setting of file permissions on Windows
++	umask = 0
++}

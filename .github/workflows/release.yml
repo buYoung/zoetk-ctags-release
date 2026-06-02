@@ -1,0 +1,300 @@
+name: build-zoekt-ctags-release
+
+# Builds zoekt binaries (from VENDORED source) + universal-ctags (built natively
+# per platform) and publishes a combined per-platform archive as a GitHub Release.
+#
+# zoekt is vendored at third_party/zoekt (NOT fetched from upstream) because it has
+# no release tags and Windows support lives in an unmerged PR. See
+# third_party/zoekt/VENDOR.md for the base commit + applied patch + update procedure.
+#
+# CTAGS_REF is pinned; bump deliberately (kept in sync with what zoekt tests against).
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+env:
+  # zoekt's own install-ctags-alpine.sh pins v6.1.0. Keep this aligned.
+  CTAGS_REF: v6.1.0
+  CTAGS_TARBALL_DIR: ctags-6.1.0
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # zoekt: pure-Go (CGO_ENABLED=0) -> cross-compile all 6 targets from a single
+  # Linux runner, using the VENDORED source at third_party/zoekt (which carries
+  # the Windows-support patch; see third_party/zoekt/VENDOR.md). Windows builds
+  # only because of that vendored patch -- upstream alone does NOT compile for
+  # GOOS=windows (index mmap + unix.Umask are Unix-only).
+  # ---------------------------------------------------------------------------
+  build-zoekt:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-amd64,   goos: linux,   goarch: amd64 }
+          - { target: linux-arm64,   goos: linux,   goarch: arm64 }
+          - { target: macos-amd64,   goos: darwin,  goarch: amd64 }
+          - { target: macos-arm64,   goos: darwin,  goarch: arm64 }
+          - { target: windows-amd64, goos: windows, goarch: amd64, ext: ".exe" }
+          - { target: windows-arm64, goos: windows, goarch: arm64, ext: ".exe" }
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout this repo (contains vendored zoekt)
+        uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Build zoekt binaries from vendored source
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -eux
+          mkdir -p "${GITHUB_WORKSPACE}/dist"
+          cd third_party/zoekt
+          for cmd in zoekt-webserver zoekt-git-index zoekt-index; do
+            go build -trimpath -ldflags="-s -w" \
+              -o "${GITHUB_WORKSPACE}/dist/${cmd}${{ matrix.ext }}" "./cmd/${cmd}"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zoekt-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # universal-ctags on Linux: fully static (musl) so it runs on any distro.
+  # Native build on amd64 / arm64 runners -> feature check runs in-place.
+  # ---------------------------------------------------------------------------
+  build-ctags-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-amd64, runner: ubuntu-24.04 }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    container: alpine:3.20
+    steps:
+      - name: Install build deps
+        run: |
+          # libc6-compat/gcompat: JS-based GitHub actions ship a glibc Node;
+          # they fail to run in a pure-musl Alpine container without these.
+          apk add --no-cache libc6-compat gcompat \
+            autoconf automake binutils g++ gcc make \
+            pkgconfig curl tar xz jansson-dev jansson-static
+      - name: Build static universal-ctags (minimal, stripped)
+        run: |
+          set -eux
+          curl -fL --retry 5 \
+            "https://codeload.github.com/universal-ctags/ctags/tar.gz/${CTAGS_REF}" \
+            | tar xz
+          cd "${CTAGS_TARBALL_DIR}"
+          ./autogen.sh
+          # Only jansson dev/static is installed (no libyaml/pcre2/libxml2), so the
+          # feature set stays minimal: +json +interactive -- matching every other
+          # platform (parity). zoekt only needs json+interactive.
+          LDFLAGS="-static" ./configure \
+            --prefix="${GITHUB_WORKSPACE}/out" \
+            --program-prefix=universal- --enable-json --disable-readcmd
+          make -j"$(nproc)"
+          make install
+          strip "${GITHUB_WORKSPACE}/out/bin/universal-ctags"
+      - name: Verify jansson + interactive support
+        run: |
+          set -eux
+          "${GITHUB_WORKSPACE}/out/bin/universal-ctags" --list-features | grep -wq json
+          "${GITHUB_WORKSPACE}/out/bin/universal-ctags" --list-features | grep -wq interactive
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctags-${{ matrix.target }}
+          path: out/bin/universal-ctags
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # universal-ctags on macOS: minimal + self-contained.
+  #  - jansson built from source as a static lib (reliable deployment-target
+  #    floor, unlike the Homebrew bottle which targets the runner's macOS).
+  #  - PKG_CONFIG_LIBDIR scoped to an empty dir so libyaml/pcre2/libxml2 are
+  #    NOT picked up -> feature set is +json +interactive only (parity), and the
+  #    only remaining deps are system /usr/lib (self-contained).
+  # NOTE: binaries are unsigned -> Gatekeeper will warn on end-user machines.
+  # ---------------------------------------------------------------------------
+  build-ctags-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: macos-amd64, runner: macos-13, min: "10.15" }   # Intel
+          - { target: macos-arm64, runner: macos-14, min: "11.0" }    # Apple Silicon (arm64 min is 11.0)
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Install build deps
+        run: brew install autoconf automake pkg-config
+      - name: Build minimal self-contained universal-ctags
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.min }}
+        run: |
+          set -eux
+          PFX="${GITHUB_WORKSPACE}/jansson-prefix"
+          # 1) static jansson from source (native arch, controlled deployment floor)
+          curl -fL --retry 5 \
+            "https://github.com/akheron/jansson/releases/download/v2.15.0/jansson-2.15.0.tar.gz" \
+            | tar xz
+          ( cd jansson-2.15.0
+            ./configure --prefix="$PFX" --enable-static --disable-shared \
+              CFLAGS="-mmacosx-version-min=${{ matrix.min }}"
+            make -j"$(sysctl -n hw.ncpu)"
+            make install )
+          # 2) ctags: empty PKG_CONFIG_LIBDIR drops yaml/pcre2/xml2; jansson via explicit static override
+          curl -fL --retry 5 \
+            "https://codeload.github.com/universal-ctags/ctags/tar.gz/${CTAGS_REF}" \
+            | tar xz
+          cd "${CTAGS_TARBALL_DIR}"
+          ./autogen.sh
+          EMPTY="$(mktemp -d)"
+          PKG_CONFIG_LIBDIR="$EMPTY" ./configure \
+            --prefix="${GITHUB_WORKSPACE}/out" \
+            --program-prefix=universal- --enable-json --disable-readcmd \
+            CFLAGS="-mmacosx-version-min=${{ matrix.min }} -O2" \
+            JANSSON_CFLAGS="-I${PFX}/include" \
+            JANSSON_LIBS="${PFX}/lib/libjansson.a"
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+          strip "${GITHUB_WORKSPACE}/out/bin/universal-ctags"
+      - name: Verify (json + interactive + self-contained)
+        run: |
+          set -eux
+          B="${GITHUB_WORKSPACE}/out/bin/universal-ctags"
+          "$B" --list-features | grep -wq json
+          "$B" --list-features | grep -wq interactive
+          # fail if any non-system (Homebrew) or jansson dylib dependency remains
+          ! otool -L "$B" | awk 'NR>1{print $1}' | grep -qE '^/opt/homebrew|^/usr/local|libjansson'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctags-${{ matrix.target }}
+          path: out/bin/universal-ctags
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # universal-ctags on Windows via a SINGLE LLVM toolchain (llvm-mingw), cross-
+  # compiled from Linux for BOTH arches. No Windows runners, no MSVC, no MSYS2.
+  # Static + self-contained (json/interactive only; jansson+iconv statically
+  # linked -> imports are system DLLs only). Verified locally for x86_64 & arm64.
+  # Runtime (--list-features) can't run here (cross-build) -> verified on a real
+  # Windows host or via Wine; +json is guaranteed by the --enable-json build.
+  # ---------------------------------------------------------------------------
+  build-ctags-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: windows-amd64, triple: x86_64-w64-mingw32 }
+          - { target: windows-arm64, triple: aarch64-w64-mingw32 }
+    runs-on: ubuntu-24.04
+    container: mstorsjo/llvm-mingw:20260519
+    steps:
+      - name: Install build tools
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          # build-essential: native compiler for ctags' packcc build-tool. file: PE check.
+          apt-get install -y -qq build-essential autoconf automake libtool make \
+            pkg-config curl ca-certificates file xz-utils
+      - name: Cross-build static universal-ctags
+        run: |
+          set -eux
+          TRIPLE=${{ matrix.triple }}
+          # libiconv (static) — Windows has no system iconv; ctags requires it.
+          curl -fL --retry 5 https://ftp.gnu.org/gnu/libiconv/libiconv-1.17.tar.gz | tar xz
+          ( cd libiconv-1.17 && ./configure --host="$TRIPLE" --prefix=/mw \
+              --enable-static --disable-shared CC="$TRIPLE-clang" \
+            && make -j"$(nproc)" && make install )
+          # jansson (static)
+          curl -fL --retry 5 https://github.com/akheron/jansson/releases/download/v2.15.0/jansson-2.15.0.tar.gz | tar xz
+          ( cd jansson-2.15.0 && ./configure --host="$TRIPLE" --prefix=/mw \
+              --enable-static --disable-shared CC="$TRIPLE-clang" \
+            && make -j"$(nproc)" && make install )
+          # ctags: empty PKG_CONFIG_LIBDIR drops yaml/pcre2/xml2 (parity); static link.
+          curl -fL --retry 5 "https://codeload.github.com/universal-ctags/ctags/tar.gz/${CTAGS_REF}" | tar xz
+          cd "${CTAGS_TARBALL_DIR}"
+          ./autogen.sh
+          EMPTY="$(mktemp -d)"
+          PKG_CONFIG_LIBDIR="$EMPTY" ./configure --host="$TRIPLE" \
+            --program-prefix=universal- --enable-json --disable-readcmd \
+            CC="$TRIPLE-clang" CPPFLAGS="-I/mw/include" LDFLAGS="-static -L/mw/lib" \
+            WINDRES="$TRIPLE-windres" RC="$TRIPLE-windres" \
+            JANSSON_CFLAGS="-I/mw/include" JANSSON_LIBS="/mw/lib/libjansson.a"
+          make -j"$(nproc)" WINDRES="$TRIPLE-windres"
+          "$TRIPLE-strip" ctags.exe
+          mkdir -p "${GITHUB_WORKSPACE}/out"
+          cp ctags.exe "${GITHUB_WORKSPACE}/out/universal-ctags.exe"
+      - name: Verify (PE + static self-contained)
+        run: |
+          set -eux
+          TRIPLE=${{ matrix.triple }}
+          B="${GITHUB_WORKSPACE}/out/universal-ctags.exe"
+          file "$B"
+          # fail if any non-system (jansson/iconv) DLL import remains -> not static
+          ! "$TRIPLE-objdump" -p "$B" | grep -iE 'jansson|iconv'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctags-${{ matrix.target }}
+          path: out/universal-ctags.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Bundle zoekt + ctags per platform and publish. `if: always()` is defensive:
+  # if any single cell fails, still release the cells that succeeded.
+  # ---------------------------------------------------------------------------
+  package-and-release:
+    needs: [build-zoekt, build-ctags-linux, build-ctags-macos, build-ctags-windows]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble per-platform archives
+        run: |
+          set -eux
+          mkdir -p out
+          for t in linux-amd64 linux-arm64 macos-amd64 macos-arm64 windows-amd64 windows-arm64; do
+            z="artifacts/zoekt-${t}"
+            c="artifacts/ctags-${t}"
+            if [ -d "$z" ] && [ -d "$c" ]; then
+              stage="stage/${t}"; mkdir -p "$stage"
+              cp "$z"/* "$stage"/
+              cp "$c"/* "$stage"/
+              chmod +x "$stage"/* || true
+              case "$t" in
+                windows-*) (cd stage && zip -r "../out/zoekt-ctags-${t}.zip" "$t") ;;
+                *)         tar -czf "out/zoekt-ctags-${t}.tar.gz" -C stage "$t" ;;
+              esac
+            else
+              echo "::warning::skip ${t} (zoekt=$([ -d "$z" ] && echo ok || echo MISSING), ctags=$([ -d "$c" ] && echo ok || echo MISSING))"
+            fi
+          done
+          ls -l out
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          body: |
+            zoekt: vendored (see third_party/zoekt/VENDOR.md) + universal-ctags `${{ env.CTAGS_REF }}`
+
+            ctags: minimal feature set (+json +interactive), self-contained, stripped.
+            zoekt: all targets Go-cross-built on Linux. ctags: Linux + Windows cross-built on
+            Linux (Windows via one llvm-mingw toolchain, no Windows runners); macOS ctags still
+            built on macOS runners (no Linux->macOS cross here).
+            Runtime-verified: linux-amd64/arm64, macos-amd64/arm64 (+ macos x86_64 via Rosetta).
+            Build-verified only (runtime not yet tested on real hardware): windows-amd64, windows-arm64.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bundles
+          path: out/

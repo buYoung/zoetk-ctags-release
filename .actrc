@@ -1,0 +1,13 @@
+# nektos/act configuration for local GitHub Actions emulation.
+#
+# Scope: act can only run the Linux jobs of this workflow.
+#   testable : build-zoekt, build-ctags-linux
+#   NOT testable (macOS/Windows runners): build-ctags-macos, build-ctags-windows
+# act is NOT a substitute for a real workflow_dispatch run.
+
+# Map the runner labels this workflow uses to runnable Linux images.
+-P ubuntu-24.04=catthehacker/ubuntu:act-24.04
+-P ubuntu-24.04-arm=catthehacker/ubuntu:act-24.04
+
+# Persist artifacts so upload/download-artifact steps work locally.
+--artifact-server-path /tmp/act-artifacts
