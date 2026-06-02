@@ -64,14 +64,31 @@ host-deployable binaries.
 
 ### Publish a release
 
-Pushing a tag runs build → package → GitHub Release upload automatically.
+Version bump, tagging, and push are driven by [release-it](https://github.com/release-it/release-it)
+(a semi-automated, human-in-the-loop flow).
+
+1. **Write the changelog** — author the new version section in `CHANGELOG.md` with codex, then review it.
+2. **Run release-it** — `pnpm release` interactively walks through version choice → commit
+   (`chore: release vX.Y.Z`) → `vX.Y.Z` tag → push, **confirming each step**.
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+pnpm install        # once (installs release-it)
+pnpm release        # interactive release (confirms each step)
+pnpm release minor  # explicit increment (patch / minor / major)
+pnpm release 0.1.0  # explicit version (recommended for the first release)
+pnpm release:dry    # preview only, no changes
 ```
 
+3. **CI takes over** — the pushed `vX.Y.Z` tag triggers build → package → GitHub Release. The release
+   body leads with the matching `CHANGELOG.md` section, followed by the build/integrity/licensing notes.
+
+> release-it does NOT generate the changelog (codex authors and you review it). release-it only handles
+> version/tag/push; the GitHub Release is created solely by CI (no double-creation). Since
+> `git add . --update` stages only tracked changes, clean up unrelated edits before releasing.
+
 To check the build without publishing, run `workflow_dispatch` manually from the Actions tab.
+Manual tagging (`git tag vX.Y.Z && git push origin vX.Y.Z`) triggers CI the same way (the changelog is
+then taken from `CHANGELOG.md` as-is, without the codex review step).
 
 ### Local verification (optional)
 
@@ -149,6 +166,9 @@ sha256sum --ignore-missing -c SHA256SUMS
 .github/workflows/release.yml   # build · package · release workflow
 third_party/zoekt/              # vendored zoekt source (+ Windows patch) + VENDOR.md
 patches/                        # divergence from upstream (Windows-support patch)
+.release-it.json                # release-it config (version/tag/push; GitHub Release is CI's job)
+CHANGELOG.md                    # release notes (authored/reviewed via codex, injected into the release body by CI)
+package.json                    # pnpm + release-it tooling (private, not published to npm)
 .actrc                          # runner mappings for local `act` runs
 ```
 

@@ -256,6 +256,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Repo checkout is needed so we can read CHANGELOG.md (authored by codex,
+      # reviewed before the tag was pushed) and inject it into the release body.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -314,27 +317,61 @@ jobs:
           # Combined manifest = the per-file lines, sorted by name (no re-hash).
           cat ./*.sha256 | sort -k2 > SHA256SUMS
           cat SHA256SUMS
+      # Build the release body = CHANGELOG.md section for THIS tag (authored by codex)
+      # PREPENDED to the static build/integrity/licensing notes. release-it does NOT
+      # create the release; CI is the single creator and owns the body. Written outside
+      # out/ so it is not uploaded as an asset (files: out/* / SHA256SUMS exclude it).
+      - name: Assemble release notes (changelog + static notes)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -eux
+          version="${GITHUB_REF_NAME#v}"
+          # Extract the "## [X.Y.Z]" section, up to (not incl.) the next "## [" heading.
+          awk -v ver="$version" '
+            index($0, "## [" ver "]") == 1 { flag=1; next }
+            flag && /^## \[/ { exit }
+            flag { print }
+          ' CHANGELOG.md > changelog-section.md || true
+          BODY="${GITHUB_WORKSPACE}/RELEASE_BODY.md"
+          {
+            echo "## Changelog"
+            echo
+            if [ -s changelog-section.md ]; then
+              cat changelog-section.md
+            else
+              echo "_(CHANGELOG.md에 v${version} 항목이 없습니다)_"
+            fi
+            echo
+            echo "---"
+            echo
+          } > "$BODY"
+          # Quoted heredoc -> no shell expansion (backticks stay literal); the one
+          # version token is substituted via sed from the workflow env CTAGS_REF.
+          cat <<'NOTES' | sed "s/@CTAGS_REF@/${CTAGS_REF}/g" >> "$BODY"
+          zoekt: vendored (see third_party/zoekt/VENDOR.md) + universal-ctags `@CTAGS_REF@`
+
+          ctags: minimal feature set (+json +interactive), self-contained, stripped.
+          zoekt: all targets Go-cross-built on Linux. ctags: Linux + Windows cross-built on
+          Linux (Windows via one llvm-mingw toolchain, no Windows runners); macOS ctags still
+          built on macOS runners (no Linux->macOS cross here).
+          Runtime-verified: linux-amd64/arm64, macos-amd64/arm64 (+ macos x86_64 via Rosetta).
+          Build-verified only (runtime not yet tested on real hardware): windows-amd64, windows-arm64.
+
+          Integrity: every asset has a sibling `<name>.sha256`, and `SHA256SUMS` lists them all.
+          Verify a single download with: `sha256sum --ignore-missing -c SHA256SUMS`
+
+          Licensing: this project is Apache-2.0; bundled universal-ctags is GPL-2.0-or-later
+          (with LGPL-2.1+ libiconv statically linked on Windows). Corresponding source is attached
+          as SOURCE-*.tar.gz. See THIRD_PARTY_NOTICES.md.
+          NOTES
+          echo "----- RELEASE_BODY.md -----"
+          cat "$BODY"
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: out/*
-          body: |
-            zoekt: vendored (see third_party/zoekt/VENDOR.md) + universal-ctags `${{ env.CTAGS_REF }}`
-
-            ctags: minimal feature set (+json +interactive), self-contained, stripped.
-            zoekt: all targets Go-cross-built on Linux. ctags: Linux + Windows cross-built on
-            Linux (Windows via one llvm-mingw toolchain, no Windows runners); macOS ctags still
-            built on macOS runners (no Linux->macOS cross here).
-            Runtime-verified: linux-amd64/arm64, macos-amd64/arm64 (+ macos x86_64 via Rosetta).
-            Build-verified only (runtime not yet tested on real hardware): windows-amd64, windows-arm64.
-
-            Integrity: every asset has a sibling `<name>.sha256`, and `SHA256SUMS` lists them all.
-            Verify a single download with: `sha256sum --ignore-missing -c SHA256SUMS`
-
-            Licensing: this project is Apache-2.0; bundled universal-ctags is GPL-2.0-or-later
-            (with LGPL-2.1+ libiconv statically linked on Windows). Corresponding source is attached
-            as SOURCE-*.tar.gz. See THIRD_PARTY_NOTICES.md.
+          body_path: ${{ github.workspace }}/RELEASE_BODY.md
       - uses: actions/upload-artifact@v4
         with:
           name: release-bundles

@@ -62,14 +62,27 @@ zoekt 바이너리(`zoekt-webserver`, `zoekt-git-index`, `zoekt-index`)와 `univ
 
 ### 릴리스 발행
 
-태그를 push하면 빌드 → 패키징 → GitHub Release 업로드가 자동 진행됩니다.
+버전 증가·태깅·push는 [release-it](https://github.com/release-it/release-it)으로 수행합니다(반자동화 통제형).
+
+1. **changelog 작성** — codex로 `CHANGELOG.md`의 새 버전 섹션을 작성하고 검토합니다.
+2. **release-it 실행** — `pnpm release`를 실행하면 대화형으로 버전 선택 → 커밋(`chore: release vX.Y.Z`) → `vX.Y.Z` 태그 → push를 **각 단계 확인 후** 진행합니다.
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+pnpm install        # 최초 1회 (release-it 설치)
+pnpm release        # 대화형 릴리스 (각 단계 확인)
+pnpm release minor  # 증가량 명시 (patch / minor / major)
+pnpm release 0.1.0  # 버전 직접 지정 (첫 릴리스 권장)
+pnpm release:dry    # 변경 없이 동작만 미리보기
 ```
 
+3. **CI 자동 진행** — push된 `vX.Y.Z` 태그가 빌드 → 패키징 → GitHub Release 생성을 트리거합니다. 릴리스 본문에는 `CHANGELOG.md`의 해당 버전 섹션이 먼저 들어가고, 빌드·무결성·라이선스 노트가 이어집니다.
+
+> changelog는 release-it이 자동 생성하지 않습니다(codex가 작성·검토). release-it은 버전·태그·push만 담당하고,
+> GitHub Release는 CI가 단독으로 생성합니다(이중 생성 방지). `git add . --update`는 추적 중인 변경만 담으므로
+> release 전 `CHANGELOG.md` 외 불필요한 변경은 정리하세요.
+
 릴리스 없이 빌드만 확인하려면 Actions 탭에서 `workflow_dispatch`로 수동 실행하세요.
+수동 태깅(`git tag vX.Y.Z && git push origin vX.Y.Z`)도 동일하게 CI를 트리거합니다(이 경우 changelog는 codex 검토 없이 `CHANGELOG.md` 상태 그대로 반영).
 
 ### 로컬 검증 (선택)
 
@@ -143,6 +156,9 @@ sha256sum --ignore-missing -c SHA256SUMS
 .github/workflows/release.yml   # 빌드 · 패키징 · 릴리스 워크플로
 third_party/zoekt/              # 벤더링된 zoekt 소스(+ Windows 패치) + VENDOR.md
 patches/                        # 업스트림 대비 divergence(Windows 지원 패치)
+.release-it.json                # release-it 설정 (버전·태그·push 담당; GitHub Release는 CI)
+CHANGELOG.md                    # 릴리스 노트 (codex 작성·검토, CI가 릴리스 본문에 주입)
+package.json                    # pnpm + release-it 도구 정의 (private, npm 미발행)
 .actrc                          # act 로컬 실행용 러너 매핑
 ```
 
