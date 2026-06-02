@@ -110,6 +110,26 @@ ctags의 minimal 기능 세트는 `PKG_CONFIG_LIBDIR`을 스코핑해 yaml/pcre2
 | Linux / macOS | `zoekt-ctags-<os>-<arch>.tar.gz` |
 | Windows | `zoekt-ctags-<os>-<arch>.zip` |
 
+### 무결성 검증 (SHA-256)
+
+각 릴리스에는 체크섬 파일이 함께 첨부됩니다. 해시 대상은 다운로드하는 **아카이브 파일 자체**(`.tar.gz`/`.zip`)와
+GPL 소스 tarball(`SOURCE-*.tar.gz`)입니다.
+
+- 자산별 `<파일명>.sha256` — 단일 파일 검증용 (`sha256sum` 형식)
+- `SHA256SUMS` — 모든 자산 해시를 담은 단일 매니페스트
+
+```bash
+# 단일 파일 검증
+sha256sum -c zoekt-ctags-linux-amd64.tar.gz.sha256
+
+# 받은 파일만 통합 매니페스트로 검증
+#   --ignore-missing 필수: 받지 않은 다른 플랫폼/소스 항목은 건너뜁니다(없으면 실패로 잡힘).
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
+> `sha256sum`이 없는 macOS에서는 `shasum -a 256 ...`로 동일하게 동작합니다.
+> 해시는 해당 릴리스 산출물 기준입니다(tar/gzip이 mtime을 포함하므로 재빌드 시 값이 달라질 수 있음).
+
 ## 런타임 요구사항
 
 - **`git`**: `zoekt-git-index`는 호스트의 `git` 실행 파일을 호출하므로 배포 호스트에 git이 설치돼 있어야 합니다.

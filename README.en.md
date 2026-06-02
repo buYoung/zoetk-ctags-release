@@ -115,6 +115,27 @@ Each platform bundles the 3 zoekt binaries + `universal-ctags` (`.exe` on Window
 | Linux / macOS | `zoekt-ctags-<os>-<arch>.tar.gz` |
 | Windows | `zoekt-ctags-<os>-<arch>.zip` |
 
+### Integrity verification (SHA-256)
+
+Every release ships checksum files. The hash target is the **downloaded archive itself**
+(`.tar.gz`/`.zip`) and the GPL source tarballs (`SOURCE-*.tar.gz`).
+
+- `<name>.sha256` per asset — single-file verification (`sha256sum` format)
+- `SHA256SUMS` — one manifest with the hashes of every asset
+
+```bash
+# verify a single file
+sha256sum -c zoekt-ctags-linux-amd64.tar.gz.sha256
+
+# verify only what you downloaded against the combined manifest
+#   --ignore-missing is required: entries for assets you didn't download are skipped
+#   (otherwise they count as failures).
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
+> On macOS without `sha256sum`, use `shasum -a 256 ...` (same checksum-file format).
+> Hashes are per release artifact (tar/gzip embed mtimes, so a rebuild may produce different values).
+
 ## Runtime Requirements
 
 - **`git`**: `zoekt-git-index` shells out to the host's `git`, so it must be installed on the deployment host.

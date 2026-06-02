@@ -293,6 +293,27 @@ jobs:
             "https://ftp.gnu.org/gnu/libiconv/libiconv-1.17.tar.gz"
           curl -fL --retry 5 -o "out/SOURCE-jansson-2.15.0.tar.gz" \
             "https://github.com/akheron/jansson/releases/download/v2.15.0/jansson-2.15.0.tar.gz"
+      # SHA-256 integrity. For EVERY published file we emit a sibling
+      # <name>.sha256 in sha256sum format (so `sha256sum -c <name>.sha256` works),
+      # plus a single SHA256SUMS manifest listing them all (DX: one file to verify
+      # any download; the MCP server pins these same values).
+      # Hash target = the published files themselves -- the per-platform archive a
+      # consumer downloads (.tar.gz/.zip) and the GPL SOURCE-*.tar.gz. tar/gzip embed
+      # mtimes, so hashes are per-release-artifact, NOT reproducible across rebuilds.
+      # Verify a single download with: sha256sum --ignore-missing -c SHA256SUMS
+      - name: Generate SHA-256 checksums
+        run: |
+          set -eux
+          cd out
+          rm -f SHA256SUMS ./*.sha256
+          for f in *; do
+            [ -f "$f" ] || continue
+            case "$f" in SHA256SUMS|*.sha256) continue ;; esac
+            sha256sum "$f" > "$f.sha256"
+          done
+          # Combined manifest = the per-file lines, sorted by name (no re-hash).
+          cat ./*.sha256 | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -307,6 +328,9 @@ jobs:
             built on macOS runners (no Linux->macOS cross here).
             Runtime-verified: linux-amd64/arm64, macos-amd64/arm64 (+ macos x86_64 via Rosetta).
             Build-verified only (runtime not yet tested on real hardware): windows-amd64, windows-arm64.
+
+            Integrity: every asset has a sibling `<name>.sha256`, and `SHA256SUMS` lists them all.
+            Verify a single download with: `sha256sum --ignore-missing -c SHA256SUMS`
 
             Licensing: this project is Apache-2.0; bundled universal-ctags is GPL-2.0-or-later
             (with LGPL-2.1+ libiconv statically linked on Windows). Corresponding source is attached
