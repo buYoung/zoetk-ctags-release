@@ -9,6 +9,12 @@ see the "Publish a release" section in the README.
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-06-02
+
+### Changed
+
+- macOS release archives now contain signed and notarized binaries, allowing macOS hosts to validate them through Apple's standard security checks before running them.
+
 ## [0.0.2] - 2026-06-02
 
 ### Fixed

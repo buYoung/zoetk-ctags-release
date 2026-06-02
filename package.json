@@ -1,6 +1,6 @@
 {
   "name": "zoekt-ctags-release",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "description": "Multi-platform release builds of zoekt + universal-ctags as self-contained static binaries",
   "license": "Apache-2.0",
